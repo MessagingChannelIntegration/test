@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="en">
+    <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no">
+    <title>Messaging Dashboard</title>
+    <link rel="stylesheet" href="https://stackpath.bootstrapcdn.com/bootstrap/4.5.2/css/bootstrap.min.css">
+    <script src="https://cdn.socket.io/4.0.1/socket.io.min.js"></script>
+    <script type="text/javascript">
+        document.addEventListener("DOMContentLoaded", function() {
+            var socket = io();
+            socket.on("connect", function() {
+                console.log("Connected to server");
+            });
+            socket.on("new_message", function(data) {
+                console.log("New message received:", data);
+                var messageList = document.getElementById("message-list");
+                var newItem = document.createElement("li");
+                newItem.className = "list-group-item";
+                newItem.innerHTML = "<strong>[" + data.source + "]</strong> " + data.text + " <span class='float-right'>" + data.time + "</span>";
+                messageList.insertBefore(newItem, messageList.firstChild);
+                if (messageList.children.length > 5) {
+                    messageList.children[5].style.display = "none";
+                    messageList.children[5].classList.add("hidden-message");
+                }
+                updateLoadMoreButton();
+            });
+            updateLoadMoreButton();
+        });
+
+        function loadMoreMessages() {
+            const allMessages = document.getElementsByClassName("hidden-message");
+            let count = 0;
+            for (let i = 0; i < allMessages.length; i++) {
+                if (allMessages[i].style.display === "none" && count < 5) {
+                    allMessages[i].style.display = "list-item";
+                    count++;
+                }
+            }
+            updateLoadMoreButton();
+        }
+
+        function collapseMessages() {
+            const allMessages = document.getElementsByClassName("hidden-message");
+            for (let i = 0; i < allMessages.length; i++) {
+                allMessages[i].style.display = "none";
+            }
+            updateLoadMoreButton();
+        }
+
+        function updateLoadMoreButton() {
+            const allMessages = document.getElementsByClassName("hidden-message");
+            let hiddenCount = 0;
+            for (let i = 0; i < allMessages.length; i++) {
+                if (allMessages[i].style.display === "none") {
+                    hiddenCount++;
+                }
+            }
+            const loadMoreButton = document.getElementById("load-more-button");
+            const collapseButton = document.getElementById("collapse-button");
+            if (hiddenCount === 0) {
+                if (loadMoreButton) loadMoreButton.style.display = "none";
+                if (collapseButton) collapseButton.style.display = "block";
+            } else {
+                if (loadMoreButton) loadMoreButton.style.display = "block";
+                if (collapseButton) collapseButton.style.display = "none";
+            }
+        }
+    </script>
+    </head>
+    <body>
+    <div class="container">
+        <h1 class="mt-5">Messages</h1>
+        <ul id="message-list" class="list-group mt-3">
+        {% for message in messages[:5] %}
+            <li class="list-group-item">
+            <strong>[{{ message['source'] }}]</strong> {{ message['text'] }} <span class='float-right'>{{ message['time'] }}</span>
+            </li>
+        {% endfor %}
+        {% for message in messages[5:] %}
+            <li class="list-group-item hidden-message" style="display: none;">
+            <strong>[{{ message['source'] }}]</strong> {{ message['text'] }} <span class='float-right'>{{ message['time'] }}</span>
+            </li>
+        {% endfor %}
+        </ul>
+        {% if load_more_button_visible %}
+        <button id="load-more-button" class="btn btn-primary mt-3" onclick="loadMoreMessages()">더보기 ↓</button>
+        <button id="collapse-button" class="btn btn-secondary mt-3" onclick="collapseMessages()" style="display: none;">접기 ↑</button>
+        {% endif %}
+    </div>
+    </body>
+</html>
