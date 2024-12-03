@@ -136,12 +136,12 @@ class FrontendVisualizer:
 
 # 사용 예시
 # Slack 및 Telegram 핸들러 설정
-slack_handler = SlackHandler(api_key="xoxb-8074700828402-8087394180673-Lk6nBqmP71Jn1a4isCY6PmyB", channel_id="C0826LNBL7L")
+slack_handler = SlackHandler(api_key="", channel_id="")
 slack_manager = MessagingServiceManager(slack_handler)
 slack_messages = slack_manager.process_messages()
 print("Slack 메시지:", slack_messages)
 
-telegram_handler = TelegramHandler(api_key="7561927766:AAGe1SfBg3Ab7Pgps1kMWiG3RAtpZtLKIN0", chat_id=7848217593)
+telegram_handler = TelegramHandler(api_key="", chat_id="")
 telegram_manager = MessagingServiceManager(telegram_handler)
 telegram_messages = telegram_manager.process_messages()
 print("Telegram 메시지:", telegram_messages)
@@ -180,8 +180,8 @@ else:
 """
 
 # Telegram chat ID 확인 코드 (참고용)
-"""
-api_token = 'your_telegram_api_token'
+
+api_token = '7561927766:AAGe1SfBg3Ab7Pgps1kMWiG3RAtpZtLKIN0'
 url = f'https://api.telegram.org/bot{api_token}/getUpdates'
 
 response = requests.get(url)
@@ -191,4 +191,4 @@ updates = response.json()
 for update in updates['result']:
     chat_id = update['message']['chat']['id']
     print(f"Chat ID: {chat_id}")
-"""
+
