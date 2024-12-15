@@ -1,23 +1,16 @@
 import logging
 import requests
 from abc import ABC, abstractmethod
-from utils import handle_error, format_timestamp
 from flask import Flask, render_template
 from flask_socketio import SocketIO
-from sklearn.feature_extraction.text import TfidfVectorizer
-import nltk
-from collections import defaultdict
-import threading
+from collections import Counter
+from kiwipiepy import Kiwi
 
-# NLTK 데이터 다운로드
-nltk.download('stopwords')
-nltk.download('punkt')
-nltk.download('wordnet')
-from nltk.stem import WordNetLemmatizer
+# Kiwi 형태소 분석기 초기화
+kiwi = Kiwi()
 
 # 로깅 설정
-logging.basicConfig(level=logging.DEBUG)
-
+logging.basicConfig(level=logging.INFO)
 
 # Abstract Base Class for Messaging Handlers
 class MessagingServiceHandler(ABC):
@@ -46,7 +39,7 @@ class SlackHandler(MessagingServiceHandler):
         if response.status_code == 200 and response.json().get("ok"):
             logging.info("Slack 연결 성공!")
         else:
-            handle_error("Slack", response)
+            logging.error(f"Slack 연결 실패: {response.json()}")
 
     def fetch_messages(self):
         url = f"https://slack.com/api/conversations.history?channel={self.channel_id}"
@@ -59,181 +52,122 @@ class SlackHandler(MessagingServiceHandler):
                     "source": "Slack",
                     "id": f"{self.channel_id}_{msg['ts']}",
                     "timestamp": float(msg["ts"]),
-                    "time": format_timestamp(msg["ts"]),
                     "text": msg.get("text", "")
                 }
                 for msg in messages
             ]
         else:
-            handle_error("Slack", response)
-
-
-# TelegramHandler
-class TelegramHandler(MessagingServiceHandler):
-    def __init__(self, api_key, chat_id):
-        super().__init__(api_key)
-        self.chat_id = chat_id
-        self.offset = None  # 메시지 오프셋 추가
-
-    def connect(self):
-        url = f"https://api.telegram.org/bot{self.api_key}/getMe"
-        response = requests.get(url)
-        if response.status_code == 200 and response.json().get("ok"):
-            logging.info("Telegram 연결 성공!")
-        else:
-            handle_error("Telegram", response)
-
-    def fetch_messages(self):
-        url = f"https://api.telegram.org/bot{self.api_key}/getUpdates"
-        if self.offset:
-            url += f"?offset={self.offset}"
-        response = requests.get(url)
-        if response.status_code == 200:
-            updates = response.json().get("result", [])
-            messages = [update["message"] for update in updates if "message" in update]
-            filtered_messages = [
-                {
-                    "source": "Telegram",
-                    "id": f"{msg['chat']['id']}_{msg['message_id']}",
-                    "timestamp": float(msg["date"]),
-                    "time": format_timestamp(msg["date"]),
-                    "text": msg.get("text", "")
-                }
-                for msg in messages if msg.get("chat", {}).get("id") == self.chat_id
-            ]
-            if updates:
-                self.offset = updates[-1]['update_id'] + 1  # 마지막 메시지 ID 업데이트
-            if not filtered_messages:
-                logging.info(f"No messages found for chat_id {self.chat_id}")
-            return filtered_messages
-        else:
-            handle_error("Telegram", response)
-
+            logging.error(f"Slack 메시지 가져오기 실패: {response.json()}")
+            return []
 
 class MessageManager:
     def __init__(self, handlers):
         self.handlers = handlers
         self.messages = []
         self.message_ids = set()
-        self.subscribers = []
 
     def fetch_messages(self):
+        new_messages = []
         for handler in self.handlers:
             try:
-                new_messages = handler.fetch_messages()
-                for message in new_messages:
+                fetched_messages = handler.fetch_messages()
+                filtered_messages = [
+                    msg for msg in fetched_messages if msg["id"] not in self.message_ids
+                ]
+                for message in filtered_messages:
                     self.add_message(message)
+                    new_messages.append(message)
             except Exception as e:
                 logging.error(f"Error fetching messages from {handler.__class__.__name__}: {e}")
+        return new_messages
 
     def add_message(self, message):
         if message['id'] not in self.message_ids:
             self.messages.append(message)
             self.message_ids.add(message['id'])
             self.messages.sort(key=lambda x: x.get('timestamp', 0), reverse=True)
-            self.notify_subscribers(message)
-
-    def subscribe(self, observer):
-        self.subscribers.append(observer)
-
-    def notify_subscribers(self, message):
-        for subscriber in self.subscribers:
-            subscriber.update(message)
-
-    def get_messages(self, count=5):
-        return self.messages[:count]
 
 
 class KeywordAnalysisModule:
-    def __init__(self):
-        self.stop_words = set(nltk.corpus.stopwords.words('english'))
-        self.lemmatizer = WordNetLemmatizer()
-        self.vectorizer = TfidfVectorizer(stop_words='english')
+    def extract_nouns_and_count(self, messages):
+        noun_counts = Counter()
 
-    def preprocess_text(self, text):
-        tokens = nltk.word_tokenize(text.lower())
-        filtered_tokens = [self.lemmatizer.lemmatize(word) for word in tokens if word.isalnum() and word not in self.stop_words]
-        return ' '.join(filtered_tokens)
+        # 불필요한 단어 필터링
+        stop_words = set([
+            "중인데", "있어요", "있을까요", "싶습니다", "있으신가요", "분", "데", 
+            "관련", "자료", "발표", "책", "하는", "에서", "고", "이", "그", 
+            "및", "것", "중", "을", "로", "은", "는", "가", "도", "에", 
+            "의", "들", "면", "대해", "방법", "내용", "어떻게", "왜", "더"
+        ])
 
-    def extract_keywords(self, messages):
-        processed_texts = [self.preprocess_text(msg['text']) for msg in messages]
-        tfidf_matrix = self.vectorizer.fit_transform(processed_texts)
-        feature_names = self.vectorizer.get_feature_names_out()
-        scores = tfidf_matrix.sum(axis=0).A1
-        keyword_scores = {feature_names[i]: scores[i] for i in range(len(feature_names))}
-        return keyword_scores
+        for msg in messages:
+            text = msg.get("text", "").strip()
+            if not text or "<@" in text:  # 사용자 태그 제외
+                continue
 
+            # Kiwi를 이용한 명사 추출
+            analysis = kiwi.analyze(text)[0][0]  # 첫 번째 분석 결과의 토큰 리스트
+            nouns = [
+                token.form for token in analysis
+                if token.tag.startswith("N")  # 명사(NNG, NNP 등)
+                and len(token.form) > 1  # 단어 길이가 1 이상
+                and token.form not in stop_words
+            ]
+            noun_counts.update(nouns)
 
-class RecommendationService:
-    def __init__(self, keyword_analyzer, socketio):
-        self.keyword_analyzer = keyword_analyzer
-        self.socketio = socketio
-        self.recommendations = {
-            "Slack": [
-                {"name": "AI Research Group", "keywords": ["AI", "machine learning", "research"]},
-                {"name": "Python Developers", "keywords": ["Python", "programming", "developers"]},
-            ],
-            "Telegram": [
-                {"name": "Deep Learning Bot", "keywords": ["deep learning", "neural networks", "AI"]},
-                {"name": "Tech News Channel", "keywords": ["technology", "news", "innovation"]},
-            ],
-        }
-
-    def update(self, message):
-        """
-        새로운 메시지가 추가되었을 때 호출됩니다.
-        메시지를 분석하고 추천 결과를 실시간으로 전송합니다.
-        """
-        # 관심 키워드 추출
-        user_keywords = self.keyword_analyzer.extract_keywords([message])
-        
-        # 추천 생성
-        recommendations = self._generate_recommendations(user_keywords)
-
-        # 실시간으로 추천 결과 전송
-        self.socketio.emit('recommendations', {'data': recommendations})
-
-    def _generate_recommendations(self, user_keywords):
-        """
-        관심 키워드를 기반으로 추천 목록 생성
-        """
-        recommendations = []
-        for platform, channels in self.recommendations.items():
-            for channel in channels:
-                score = len(set(user_keywords.keys()) & set(channel["keywords"]))
-                if score > 0:
-                    recommendations.append({"name": channel["name"], "source": platform, "score": score})
-        recommendations.sort(key=lambda x: x["score"], reverse=True)
-        return recommendations
+        # 내림차순으로 정렬된 딕셔너리 반환
+        sorted_nouns = dict(sorted(noun_counts.items(), key=lambda x: x[1], reverse=True))
+        return sorted_nouns
 
 
 
+# Flask 앱 설정
 app = Flask(__name__)
 socketio = SocketIO(app)
 
-"""slack_handler = SlackHandler(api_key="", channel_id="")
-telegram_handler = TelegramHandler(api_key="", chat_id="")
-message_manager = MessageManager(handlers=[slack_handler, telegram_handler])"""
+import os
+from dotenv import load_dotenv
 
+# .env 파일 로드
+load_dotenv()
+
+# 환경 변수 읽기
+slack_api_key = os.getenv("SLACK_API_KEY")
+if not slack_api_key:
+    raise ValueError("환경 변수 'SLACK_API_KEY'가 설정되지 않았습니다.")
+
+
+# 핸들러, 매니저, 분석 모듈 초기화
+slack_handler = SlackHandler(api_key=slack_api_key, channel_id="C0853ENPA2Z")
+message_manager = MessageManager(handlers=[slack_handler])
 keyword_analyzer = KeywordAnalysisModule()
-recommendation_service = RecommendationService(keyword_analyzer, socketio)
 
-message_manager.subscribe(recommendation_service)
 
-@app.route('/')
-def index():
-    return render_template('index.html')
+@app.route('/slack')
+def slack():
+    # Slack 메시지 필터링
+    slack_messages = [msg for msg in message_manager.messages if msg["source"] == "Slack"]
+    slack_keywords = keyword_analyzer.extract_nouns_and_count(slack_messages)
+    return render_template('index.html', title="Slack Keywords", keywords=slack_keywords)
 
 @socketio.on('connect')
 def handle_connect():
     logging.info("Client connected.")
 
+
 def background_fetch():
     while True:
-        message_manager.fetch_messages()
-        socketio.sleep(10)  # 10초마다 메시지 갱신
+        try:
+            new_messages = message_manager.fetch_messages()
+            if new_messages:
+                logging.info(f"새로운 메시지: {[msg['text'] for msg in new_messages]}")
+            socketio.sleep(10)
+        except Exception as e:
+            logging.error(f"Error during background fetch: {e}")
+
 
 socketio.start_background_task(background_fetch)
 
 if __name__ == '__main__':
     socketio.run(app, debug=True)
+
