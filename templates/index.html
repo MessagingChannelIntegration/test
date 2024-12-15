@@ -3,54 +3,14 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Real-time Recommendations</title>
-    <script src="https://cdn.socket.io/4.5.1/socket.io.min.js"></script>
-    <style>
-      body {
-        font-family: Arial, sans-serif;
-        margin: 20px;
-      }
-      h1 {
-        color: #333;
-      }
-      .recommendation {
-        margin: 10px 0;
-        padding: 10px;
-        border: 1px solid #ddd;
-        border-radius: 5px;
-        background-color: #f9f9f9;
-      }
-    </style>
+    <title>{{ title }}</title>
   </head>
   <body>
-    <h1>Real-time Recommendations</h1>
-    <div id="recommendations">
-      <p>No recommendations yet...</p>
-    </div>
-
-    <script>
-      // SocketIO 클라이언트 초기화
-      const socket = io();
-
-      // 서버로부터 'recommendations' 이벤트 수신
-      socket.on("recommendations", function (data) {
-        const recommendationsDiv = document.getElementById("recommendations");
-        recommendationsDiv.innerHTML = ""; // 기존 추천 목록 초기화
-
-        if (data.data && data.data.length > 0) {
-          data.data.forEach((rec) => {
-            const div = document.createElement("div");
-            div.className = "recommendation";
-            div.innerHTML = `
-                        <strong>${rec.name}</strong> (${rec.source})<br>
-                        <em>Score: ${rec.score}</em>
-                    `;
-            recommendationsDiv.appendChild(div);
-          });
-        } else {
-          recommendationsDiv.innerHTML = "<p>No recommendations available.</p>";
-        }
-      });
-    </script>
+    <h1>{{ title }}</h1>
+    <ul>
+      {% for keyword, count in keywords.items() %}
+      <li>{{ keyword }}: {{ count }}</li>
+      {% endfor %}
+    </ul>
   </body>
 </html>
