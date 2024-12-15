@@ -1,20 +1,29 @@
-from flask import Flask, render_template_string
-from flask_socketio import SocketIO, emit
-from abc import ABC, abstractmethod
+import logging
 import requests
-import time
-import threading
-from datetime import datetime
-from bs4 import BeautifulSoup  # À¥ ½ºÅ©·¡ÇÎÀ» À§ÇØ Ãß°¡
-import re
-from collections import Counter
+from abc import ABC, abstractmethod
+from utils import handle_error, format_timestamp
+from flask import Flask, render_template
+from flask_socketio import SocketIO
+from sklearn.feature_extraction.text import TfidfVectorizer
 import nltk
-from nltk.corpus import stopwords
-from nltk.tokenize import word_tokenize
-nltk.download('punkt')
-nltk.download('stopwords')
+from collections import defaultdict
+import threading
 
+# NLTK ë°ì´í„° ë‹¤ìš´ë¡œë“œ
+nltk.download('stopwords')
+nltk.download('punkt')
+nltk.download('wordnet')
+from nltk.stem import WordNetLemmatizer
+
+# ë¡œê¹… ì„¤ì •
+logging.basicConfig(level=logging.DEBUG)
+
+
+# Abstract Base Class for Messaging Handlers
 class MessagingServiceHandler(ABC):
+    def __init__(self, api_key):
+        self.api_key = api_key
+
     @abstractmethod
     def connect(self):
         pass
@@ -23,79 +32,208 @@ class MessagingServiceHandler(ABC):
     def fetch_messages(self):
         pass
 
-# SlackHandler ±¸Çö
+
+# SlackHandler
 class SlackHandler(MessagingServiceHandler):
     def __init__(self, api_key, channel_id):
-        self.api_key = api_key
+        super().__init__(api_key)
         self.channel_id = channel_id
 
     def connect(self):
-        # Slack API ¿¬°á Å×½ºÆ®
         url = "https://slack.com/api/auth.test"
         headers = {"Authorization": f"Bearer {self.api_key}"}
         response = requests.get(url, headers=headers)
         if response.status_code == 200 and response.json().get("ok"):
-            print("Slack ¿¬°á ¼º°ø!")
+            logging.info("Slack ì—°ê²° ì„±ê³µ!")
         else:
-            raise Exception("Slack ¿¬°á ½ÇÆÐ:", response.json())
+            handle_error("Slack", response)
 
     def fetch_messages(self):
-        # Æ¯Á¤ Ã¤³ÎÀÇ ¸Þ½ÃÁö °¡Á®¿À±â
         url = f"https://slack.com/api/conversations.history?channel={self.channel_id}"
         headers = {"Authorization": f"Bearer {self.api_key}"}
         response = requests.get(url, headers=headers)
         if response.status_code == 200 and response.json().get("ok"):
             messages = response.json().get("messages", [])
-            for msg in messages:
-                msg['source'] = 'Slack'
-                msg['id'] = f"{self.channel_id}_{msg['ts']}"
-                msg['timestamp'] = float(msg['ts'])
-                msg['time'] = datetime.fromtimestamp(float(msg['ts'])).strftime('%Y-%m-%d %H:%M:%S')
-            return messages
+            return [
+                {
+                    "source": "Slack",
+                    "id": f"{self.channel_id}_{msg['ts']}",
+                    "timestamp": float(msg["ts"]),
+                    "time": format_timestamp(msg["ts"]),
+                    "text": msg.get("text", "")
+                }
+                for msg in messages
+            ]
         else:
-            raise Exception("Slack ¸Þ½ÃÁö °¡Á®¿À±â ½ÇÆÐ:", response.json())
+            handle_error("Slack", response)
 
-# TelegramHandler ±¸Çö
+
+# TelegramHandler
 class TelegramHandler(MessagingServiceHandler):
     def __init__(self, api_key, chat_id):
-        self.api_key = api_key
+        super().__init__(api_key)
         self.chat_id = chat_id
+        self.offset = None  # ë©”ì‹œì§€ ì˜¤í”„ì…‹ ì¶”ê°€
 
     def connect(self):
-        # Telegram API ¿¬°á Å×½ºÆ®
         url = f"https://api.telegram.org/bot{self.api_key}/getMe"
         response = requests.get(url)
         if response.status_code == 200 and response.json().get("ok"):
-            print("Telegram ¿¬°á ¼º°ø!")
+            logging.info("Telegram ì—°ê²° ì„±ê³µ!")
         else:
-            raise Exception("Telegram ¿¬°á ½ÇÆÐ:", response.json())
+            handle_error("Telegram", response)
 
     def fetch_messages(self):
-        # Æ¯Á¤ Ã¤ÆÃÀÇ ¸Þ½ÃÁö °¡Á®¿À±â
         url = f"https://api.telegram.org/bot{self.api_key}/getUpdates"
+        if self.offset:
+            url += f"?offset={self.offset}"
         response = requests.get(url)
         if response.status_code == 200:
             updates = response.json().get("result", [])
             messages = [update["message"] for update in updates if "message" in update]
-            for msg in messages:
-                msg['source'] = 'Telegram'
-                msg['id'] = f"{msg['chat']['id']}_{msg['message_id']}"
-                msg['timestamp'] = float(msg['date'])
-                msg['time'] = datetime.fromtimestamp(float(msg['date'])).strftime('%Y-%m-%d %H:%M:%S')
-            return [{"text": msg.get("text", ""), "source": msg.get("source", ""), "id": msg.get("id", ""), "timestamp": msg.get("timestamp", 0.0), "time": msg.get("time", "") } for msg in messages if msg.get("chat", {}).get("id") == self.chat_id]
+            filtered_messages = [
+                {
+                    "source": "Telegram",
+                    "id": f"{msg['chat']['id']}_{msg['message_id']}",
+                    "timestamp": float(msg["date"]),
+                    "time": format_timestamp(msg["date"]),
+                    "text": msg.get("text", "")
+                }
+                for msg in messages if msg.get("chat", {}).get("id") == self.chat_id
+            ]
+            if updates:
+                self.offset = updates[-1]['update_id'] + 1  # ë§ˆì§€ë§‰ ë©”ì‹œì§€ ID ì—…ë°ì´íŠ¸
+            if not filtered_messages:
+                logging.info(f"No messages found for chat_id {self.chat_id}")
+            return filtered_messages
         else:
-            raise Exception("Telegram ¸Þ½ÃÁö °¡Á®¿À±â ½ÇÆÐ:", response.json())
-        
-        
-class Observer(ABC):
-    @abstractmethod
-    def update(self, message):
-        pass
+            handle_error("Telegram", response)
 
-# ±¸Ã¼ÀûÀÎ °üÂûÀÚ (¾Ë¸² ½Ã½ºÅÛ)
-class NotificationObserver(Observer):
-    def update(self, message):
-        source = message.get('source', 'Unknown')
-        print(f"[{source}] »õ ¸Þ½ÃÁö ¾Ë¸²: {message}")
-        
 
+class MessageManager:
+    def __init__(self, handlers):
+        self.handlers = handlers
+        self.messages = []
+        self.message_ids = set()
+        self.subscribers = []
+
+    def fetch_messages(self):
+        for handler in self.handlers:
+            try:
+                new_messages = handler.fetch_messages()
+                for message in new_messages:
+                    self.add_message(message)
+            except Exception as e:
+                logging.error(f"Error fetching messages from {handler.__class__.__name__}: {e}")
+
+    def add_message(self, message):
+        if message['id'] not in self.message_ids:
+            self.messages.append(message)
+            self.message_ids.add(message['id'])
+            self.messages.sort(key=lambda x: x.get('timestamp', 0), reverse=True)
+            self.notify_subscribers(message)
+
+    def subscribe(self, observer):
+        self.subscribers.append(observer)
+
+    def notify_subscribers(self, message):
+        for subscriber in self.subscribers:
+            subscriber.update(message)
+
+    def get_messages(self, count=5):
+        return self.messages[:count]
+
+
+class KeywordAnalysisModule:
+    def __init__(self):
+        self.stop_words = set(nltk.corpus.stopwords.words('english'))
+        self.lemmatizer = WordNetLemmatizer()
+        self.vectorizer = TfidfVectorizer(stop_words='english')
+
+    def preprocess_text(self, text):
+        tokens = nltk.word_tokenize(text.lower())
+        filtered_tokens = [self.lemmatizer.lemmatize(word) for word in tokens if word.isalnum() and word not in self.stop_words]
+        return ' '.join(filtered_tokens)
+
+    def extract_keywords(self, messages):
+        processed_texts = [self.preprocess_text(msg['text']) for msg in messages]
+        tfidf_matrix = self.vectorizer.fit_transform(processed_texts)
+        feature_names = self.vectorizer.get_feature_names_out()
+        scores = tfidf_matrix.sum(axis=0).A1
+        keyword_scores = {feature_names[i]: scores[i] for i in range(len(feature_names))}
+        return keyword_scores
+
+
+class RecommendationService:
+    def __init__(self, keyword_analyzer, socketio):
+        self.keyword_analyzer = keyword_analyzer
+        self.socketio = socketio
+        self.recommendations = {
+            "Slack": [
+                {"name": "AI Research Group", "keywords": ["AI", "machine learning", "research"]},
+                {"name": "Python Developers", "keywords": ["Python", "programming", "developers"]},
+            ],
+            "Telegram": [
+                {"name": "Deep Learning Bot", "keywords": ["deep learning", "neural networks", "AI"]},
+                {"name": "Tech News Channel", "keywords": ["technology", "news", "innovation"]},
+            ],
+        }
+
+    def update(self, message):
+        """
+        ìƒˆë¡œìš´ ë©”ì‹œì§€ê°€ ì¶”ê°€ë˜ì—ˆì„ ë•Œ í˜¸ì¶œë©ë‹ˆë‹¤.
+        ë©”ì‹œì§€ë¥¼ ë¶„ì„í•˜ê³  ì¶”ì²œ ê²°ê³¼ë¥¼ ì‹¤ì‹œê°„ìœ¼ë¡œ ì „ì†¡í•©ë‹ˆë‹¤.
+        """
+        # ê´€ì‹¬ í‚¤ì›Œë“œ ì¶”ì¶œ
+        user_keywords = self.keyword_analyzer.extract_keywords([message])
+        
+        # ì¶”ì²œ ìƒì„±
+        recommendations = self._generate_recommendations(user_keywords)
+
+        # ì‹¤ì‹œê°„ìœ¼ë¡œ ì¶”ì²œ ê²°ê³¼ ì „ì†¡
+        self.socketio.emit('recommendations', {'data': recommendations})
+
+    def _generate_recommendations(self, user_keywords):
+        """
+        ê´€ì‹¬ í‚¤ì›Œë“œë¥¼ ê¸°ë°˜ìœ¼ë¡œ ì¶”ì²œ ëª©ë¡ ìƒì„±
+        """
+        recommendations = []
+        for platform, channels in self.recommendations.items():
+            for channel in channels:
+                score = len(set(user_keywords.keys()) & set(channel["keywords"]))
+                if score > 0:
+                    recommendations.append({"name": channel["name"], "source": platform, "score": score})
+        recommendations.sort(key=lambda x: x["score"], reverse=True)
+        return recommendations
+
+
+
+app = Flask(__name__)
+socketio = SocketIO(app)
+
+"""slack_handler = SlackHandler(api_key="", channel_id="")
+telegram_handler = TelegramHandler(api_key="", chat_id="")
+message_manager = MessageManager(handlers=[slack_handler, telegram_handler])"""
+
+keyword_analyzer = KeywordAnalysisModule()
+recommendation_service = RecommendationService(keyword_analyzer, socketio)
+
+message_manager.subscribe(recommendation_service)
+
+@app.route('/')
+def index():
+    return render_template('index.html')
+
+@socketio.on('connect')
+def handle_connect():
+    logging.info("Client connected.")
+
+def background_fetch():
+    while True:
+        message_manager.fetch_messages()
+        socketio.sleep(10)  # 10ì´ˆë§ˆë‹¤ ë©”ì‹œì§€ ê°±ì‹ 
+
+socketio.start_background_task(background_fetch)
+
+if __name__ == '__main__':
+    socketio.run(app, debug=True)
