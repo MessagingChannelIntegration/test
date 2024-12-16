@@ -162,31 +162,21 @@ class RecommendationService ():
         self.keyword_analyzer = keyword_analyzer
         self.socketio = socketio
         self.channel_repository = ChannelRepository()
-        
-        # RecommendationService를 옵저버로 등록
-        self.channel_repository.add_observer(self)
-
         self.recommendations = {
             "Slack": [
                 {"name": "AI Research Group", "keywords": ["AI", "machine learning", "research"]},
                 {"name": "Python Developers", "keywords": ["Python", "programming", "developers"]},
             ],
-            "Telegram": [
-                {"name": "Deep Learning Bot", "keywords": ["deep learning", "neural networks", "AI"]},
-                {"name": "Tech News Channel", "keywords": ["technology", "news", "innovation"]},
-            ],
         }
 
     def update(self, message):
         """
-        
         새로운 메시지가 추가되었을 때 호출됩니다.
         메시지를 분석하고 추천 결과를 실시간으로 전송합니다.
-
         """
         # 관심 키워드 추출
         user_keywords = self.keyword_analyzer.extract_keywords([message])
-        
+
         # 싱글톤 클래스에서 현재 채널 정보 가져오기
         current_channels = self.channel_repository.get_channels()
 
@@ -198,9 +188,6 @@ class RecommendationService ():
 
         # 클라이언트로 실시간 추천 결과 전송
         self.socketio.emit('recommendations', {'data': recommendations})
-        
-        # 추천 생성
-        recommendations = self._generate_recommendations(user_keywords)
 
     def _generate_recommendations(self, user_keywords, current_channels):
         """
@@ -208,29 +195,31 @@ class RecommendationService ():
         """
         recommendations = []
 
-        # 현재 관리 중인 채널 데이터를 순회하며 점수 계산
+
+    # 기존 관리 중인 채널에 대한 점수 다시 계산
         for channel in current_channels:
             score = len(set(user_keywords.keys()) & set(channel.get("keywords", [])))
-            if score > 0:
-                recommendations.append(
-                    {
-                        "name": channel["name"],
-                        "source": channel["source"],
-                        "score": score,
-                    }
-                )
+            recommendations.append({
+                "name": channel["name"],
+                "source": channel.get("source", "unknown"),
+                "score": score,
+            })
 
-        # for platform, channels in self.recommendations.items():
-        #     for channel in channels:
-        #         score = len(set(user_keywords.keys()) & set(channel["keywords"]))
-        #         if score > 0:
-        #             recommendations.append({"name": channel["name"], "source": platform, "score": score})
-        # recommendations.sort(key=lambda x: x["score"], reverse=True)
+    # 새로운 채널에 대한 점수 계산
+        for platform, channels in self.recommendations.items():
+            for channel in channels:
+                # 현재 채널 목록에 없는 경우도 포함해서 점수 계산
+                score = len(set(user_keywords.keys()) & set(channel["keywords"]))
+                recommendations.append({
+                    "name": channel["name"],
+                    "source": platform,
+                    "score": score,
+                })
 
-         # 점수 기준으로 정렬 후 반환
+
+        # 점수 기준으로 정렬 후 반환
         recommendations.sort(key=lambda x: x["score"], reverse=True)
-        return recommendations
-    
+        return recommendations    
 
 # Flask 앱 설정
 app = Flask(__name__)
@@ -285,4 +274,5 @@ def background_fetch():
 socketio.start_background_task(background_fetch)
 
 if __name__ == '__main__':
-    socketio.run(app, debug=True)
+    socketio.run(app, debug=True, allow_unsafe_werkzeug=True)
+
