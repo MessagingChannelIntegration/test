@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <title>{{ title }}</title>
+    <style>
+      .user-container {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 20px;
+      }
+      .user-box {
+        border: 1px solid #ccc;
+        padding: 10px;
+        width: 300px;
+      }
+      .user-title {
+        font-weight: bold;
+        margin-bottom: 10px;
+      }
+      .keyword-list {
+        margin-top: 10px;
+        font-style: italic;
+      }
+      .news-list {
+        margin-top: 10px;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>{{ title }}</h1>
+    <div class="user-container">
+      {% for user, data in user_news.items() %}
+      <div class="user-box">
+        <div class="user-title">User: {{ user }}</div>
+        <div class="keyword-list">
+          <strong>Top Keywords:</strong> {{ ", ".join(data.keywords) }}
+        </div>
+        <ul class="news-list">
+          {% for article in data.articles %}
+          <li>
+            <a href="{{ article['url'] }}" target="_blank">
+              <strong>{{ article['title'] }}</strong>
+            </a>
+            <p>{{ article['description'] }}</p>
+          </li>
+          {% endfor %}
+        </ul>
+      </div>
+      {% endfor %}
+    </div>
+  </body>
+</html>
