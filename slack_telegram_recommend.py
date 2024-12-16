@@ -34,7 +34,7 @@ if not telegram_chat_id:
 def get_stop_words():
     return set([
         "중인데", "있어요", "있을까요", "싶습니다", "있으신가요", "분", "데", 
-        "관련", "자료", "하는", "에서", "고", "이", "그", 
+        "관련", "자료", "발표", "책", "하는", "에서", "고", "이", "그", 
         "및", "것", "중", "을", "로", "은", "는", "가", "도", "에", 
         "의", "들", "면", "대해", "방법", "내용", "어떻게", "왜", "더", "무엇"
     ])
@@ -154,25 +154,6 @@ class MessageManager:
             self.message_ids.add(message['id'])
             self.messages.sort(key=lambda x: x.get('timestamp', 0), reverse=True)
 
-# 키워드 분석 모듈
-class KeywordAnalysisModule:
-    def extract_nouns_and_count(self, messages):
-        stop_words = get_stop_words()
-        noun_counts = Counter()
-        for msg in messages:
-            text = msg.get("text", "").strip()
-            if not text or "<@" in text:
-                continue
-            analysis = kiwi.analyze(text)[0][0]
-            nouns = [
-                token.form for token in analysis
-                if token.tag.startswith("N")
-                and len(token.form) > 1
-                and token.form not in stop_words
-            ]
-            noun_counts.update(nouns)
-        return dict(sorted(noun_counts.items(), key=lambda x: x[1], reverse=True))
-
 # 사용자별 키워드 분석
 class UserKeywordAnalysis:
     def analyze_user_keywords(self, messages):
@@ -195,6 +176,23 @@ class UserKeywordAnalysis:
             user_keywords[user_id].update(nouns)
         return {user: dict(sorted(keywords.items(), key=lambda x: x[1], reverse=True))
                 for user, keywords in user_keywords.items()}
+
+    def extract_nouns_and_count(self, messages):
+        stop_words = get_stop_words()
+        noun_counts = Counter()
+        for msg in messages:
+            text = msg.get("text", "").strip()
+            if not text or "<@" in text:
+                continue
+            analysis = kiwi.analyze(text)[0][0]
+            nouns = [
+                token.form for token in analysis
+                if token.tag.startswith("N")
+                and len(token.form) > 1
+                and token.form not in stop_words
+            ]
+            noun_counts.update(nouns)
+        return dict(sorted(noun_counts.items(), key=lambda x: x[1], reverse=True))
 
 # 뉴스 검색 모듈
 class NewsFetcher:
@@ -220,38 +218,64 @@ class NewsFetcher:
 @app.route('/slack_user_keywords')
 def slack_user_keywords():
     slack_messages = [msg for msg in message_manager.messages if msg["source"] == "Slack"]
-    user_keywords = UserKeywordAnalysis().analyze_user_keywords(slack_messages)
+    user_keywords = keyword_analyzer.analyze_user_keywords(slack_messages)
     return render_template('user_keywords.html', user_data=user_keywords)
 
 @app.route('/slack_newslist')
 def slack_newslist():
     slack_messages = [msg for msg in message_manager.messages if msg["source"] == "Slack"]
-    user_keywords = UserKeywordAnalysis().analyze_user_keywords(slack_messages)
+    user_keywords = keyword_analyzer.analyze_user_keywords(slack_messages)
     personalized_news = fetch_personalized_news_with_keywords(user_keywords)
     return render_template('user_newslist.html', title="Slack Personalized News", user_news=personalized_news)
 
 @app.route('/telegram_user_keywords')
 def telegram_user_keywords():
     telegram_messages = [msg for msg in message_manager.messages if msg["source"] == "Telegram"]
-    user_keywords = UserKeywordAnalysis().analyze_user_keywords(telegram_messages)
+    user_keywords = keyword_analyzer.analyze_user_keywords(telegram_messages)
     return render_template('user_keywords.html', user_data=user_keywords)
 
 @app.route('/telegram_newslist')
 def telegram_newslist():
     telegram_messages = [msg for msg in message_manager.messages if msg["source"] == "Telegram"]
-    user_keywords = UserKeywordAnalysis().analyze_user_keywords(telegram_messages)
+    user_keywords = keyword_analyzer.analyze_user_keywords(telegram_messages)
     personalized_news = fetch_personalized_news_with_keywords(user_keywords)
     return render_template('user_newslist.html', title="Telegram Personalized News", user_news=personalized_news)
 
-def fetch_personalized_news_with_keywords(user_keywords, max_articles=3):
+def fetch_personalized_news_with_keywords(user_keywords, max_articles=5):
+    """
+    키워드의 출현 횟수를 고려하여 뉴스 기사를 추천합니다.
+    - 가장 많이 등장한 키워드를 우선으로 기사를 가져옵니다.
+    - 각 키워드에서 중복되지 않게 기사를 가져옵니다.
+    """
     personalized_news = {}
+
     for user, keywords in user_keywords.items():
-        top_keywords = list(keywords.keys())[:3]
-        articles = []
-        for keyword in top_keywords:
-            articles.extend(news_fetcher.fetch_news(keyword, max_articles=max_articles))
-        personalized_news[user] = {"keywords": top_keywords, "articles": articles}
+        sorted_keywords = sorted(keywords.items(), key=lambda x: x[1], reverse=True)  # 키워드 카운트 기준 정렬
+        total_articles = []
+        used_articles = set()  # 중복 기사 방지
+
+        for keyword, count in sorted_keywords:
+            if len(total_articles) >= max_articles:  # 최대 기사 수에 도달하면 중단
+                break
+
+            # 해당 키워드에 대한 기사 검색
+            articles = news_fetcher.fetch_news(keyword, max_articles=max_articles)
+            for article in articles:
+                article_url = article.get("url")  # 중복 확인을 위해 기사 URL 사용
+                if article_url not in used_articles:
+                    total_articles.append(article)
+                    used_articles.add(article_url)
+
+                if len(total_articles) >= max_articles:  # 최대 수를 초과하면 중단
+                    break
+
+        personalized_news[user] = {
+            "keywords": [kw for kw, _ in sorted_keywords[:3]],  # 상위 3개 키워드만 표시
+            "articles": total_articles
+        }
+
     return personalized_news
+
 
 # 실시간 백그라운드 작업
 def background_fetch():
@@ -276,7 +300,7 @@ def background_fetch():
 slack_handler = SlackHandler(api_key=slack_api_key, channel_id="C0853ENPA2Z")
 telegram_handler = TelegramHandler(api_key=telegram_api_key, chat_id=telegram_chat_id)
 message_manager = MessageManager(handlers=[slack_handler, telegram_handler])
-keyword_analyzer = KeywordAnalysisModule()
+keyword_analyzer = UserKeywordAnalysis()
 news_fetcher = NewsFetcher(api_key=news_api_key)
 socketio.start_background_task(background_fetch)
 
