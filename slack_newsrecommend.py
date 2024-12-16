@@ -5,12 +5,32 @@ from flask import Flask, render_template
 from flask_socketio import SocketIO
 from collections import Counter
 from kiwipiepy import Kiwi
+from dotenv import load_dotenv
+import os
 
-# Kiwi 형태소 분석기 초기화
-kiwi = Kiwi()
-
-# 로깅 설정
+# 초기 설정
 logging.basicConfig(level=logging.INFO)
+kiwi = Kiwi()
+app = Flask(__name__)
+socketio = SocketIO(app)
+load_dotenv()
+
+# 환경 변수 읽기
+slack_api_key = os.getenv("SLACK_API_KEY")
+if not slack_api_key:
+    raise ValueError("환경 변수 'SLACK_API_KEY'가 설정되지 않았습니다.")
+news_api_key = os.getenv("NEWS_API_KEY")
+if not news_api_key:
+    raise ValueError("환경 변수 'NEWS_API_KEY'가 설정되지 않았습니다.")
+
+# 불용어 리스트
+def get_stop_words():
+    return set([
+        "중인데", "있어요", "있을까요", "싶습니다", "있으신가요", "분", "데", 
+        "관련", "자료", "발표", "책", "하는", "에서", "고", "이", "그", 
+        "및", "것", "중", "을", "로", "은", "는", "가", "도", "에", 
+        "의", "들", "면", "대해", "방법", "내용", "어떻게", "왜", "더"
+    ])
 
 # Abstract Base Class for Messaging Handlers
 class MessagingServiceHandler(ABC):
@@ -24,7 +44,6 @@ class MessagingServiceHandler(ABC):
     @abstractmethod
     def fetch_messages(self):
         pass
-
 
 # SlackHandler
 class SlackHandler(MessagingServiceHandler):
@@ -52,7 +71,8 @@ class SlackHandler(MessagingServiceHandler):
                     "source": "Slack",
                     "id": f"{self.channel_id}_{msg['ts']}",
                     "timestamp": float(msg["ts"]),
-                    "text": msg.get("text", "")
+                    "text": msg.get("text", ""),
+                    "user": msg.get("user", "Unknown User")
                 }
                 for msg in messages
             ]
@@ -60,6 +80,7 @@ class SlackHandler(MessagingServiceHandler):
             logging.error(f"Slack 메시지 가져오기 실패: {response.json()}")
             return []
 
+# Message Manager
 class MessageManager:
     def __init__(self, handlers):
         self.handlers = handlers
@@ -87,38 +108,49 @@ class MessageManager:
             self.message_ids.add(message['id'])
             self.messages.sort(key=lambda x: x.get('timestamp', 0), reverse=True)
 
-
+# 키워드 분석 모듈
 class KeywordAnalysisModule:
     def extract_nouns_and_count(self, messages):
+        stop_words = get_stop_words()
         noun_counts = Counter()
-
-        # 불필요한 단어 필터링
-        stop_words = set([
-            "중인데", "있어요", "있을까요", "싶습니다", "있으신가요", "분", "데", 
-            "관련", "자료", "발표", "책", "하는", "에서", "고", "이", "그", 
-            "및", "것", "중", "을", "로", "은", "는", "가", "도", "에", 
-            "의", "들", "면", "대해", "방법", "내용", "어떻게", "왜", "더"
-        ])
-
         for msg in messages:
             text = msg.get("text", "").strip()
-            if not text or "<@" in text:  # 사용자 태그 제외
+            if not text or "<@" in text:
                 continue
-
-            # Kiwi를 이용한 명사 추출
-            analysis = kiwi.analyze(text)[0][0]  # 첫 번째 분석 결과의 토큰 리스트
+            analysis = kiwi.analyze(text)[0][0]
             nouns = [
                 token.form for token in analysis
-                if token.tag.startswith("N")  # 명사(NNG, NNP 등)
-                and len(token.form) > 1  # 단어 길이가 1 이상
+                if token.tag.startswith("N")
+                and len(token.form) > 1
                 and token.form not in stop_words
             ]
             noun_counts.update(nouns)
+        return dict(sorted(noun_counts.items(), key=lambda x: x[1], reverse=True))
 
-        # 내림차순으로 정렬된 딕셔너리 반환
-        sorted_nouns = dict(sorted(noun_counts.items(), key=lambda x: x[1], reverse=True))
-        return sorted_nouns
+# 사용자별 키워드 분석
+class UserKeywordAnalysis:
+    def analyze_user_keywords(self, messages):
+        user_keywords = {}
+        stop_words = get_stop_words()
+        for msg in messages:
+            user_id = msg.get("user", "Unknown User")
+            text = msg.get("text", "").strip()
+            if not text:
+                continue
+            analysis = kiwi.analyze(text)[0][0]
+            nouns = [
+                token.form for token in analysis
+                if token.tag.startswith("N")
+                and len(token.form) > 1
+                and token.form not in stop_words
+            ]
+            if user_id not in user_keywords:
+                user_keywords[user_id] = Counter()
+            user_keywords[user_id].update(nouns)
+        return {user: dict(sorted(keywords.items(), key=lambda x: x[1], reverse=True))
+                for user, keywords in user_keywords.items()}
 
+# 뉴스 검색 모듈
 class NewsFetcher:
     def __init__(self, api_key):
         self.api_key = api_key
@@ -127,8 +159,8 @@ class NewsFetcher:
     def fetch_news(self, query, max_articles=5):
         params = {
             "q": query,
-            "language": "ko",  # 언어 설정 (한국어)
-            "sortBy": "relevancy",  # 관련성 기준 정렬
+            "language": "ko",
+            "sortBy": "relevancy",
             "apiKey": self.api_key
         }
         response = requests.get(self.base_url, params=params)
@@ -139,81 +171,48 @@ class NewsFetcher:
             logging.error(f"뉴스 API 요청 실패: {response.json()}")
             return []
 
+@app.route('/slack_user_keywords')
+def user_keywords():
+    user_keywords = UserKeywordAnalysis().analyze_user_keywords(message_manager.messages)
+    return render_template('user_keywords.html', user_data=user_keywords)
 
-# Flask 앱 설정
-app = Flask(__name__)
-socketio = SocketIO(app)
-
-import os
-from dotenv import load_dotenv
-
-# .env 파일 로드
-load_dotenv()
-
-# 환경 변수 읽기
-slack_api_key = os.getenv("SLACK_API_KEY")
-if not slack_api_key:
-    raise ValueError("환경 변수 'SLACK_API_KEY'가 설정되지 않았습니다.")
-
-# .env 파일에서 뉴스 API 키 로드
-news_api_key = os.getenv("NEWS_API_KEY")
-if not news_api_key:
-    raise ValueError("환경 변수 'NEWS_API_KEY'가 설정되지 않았습니다.")
-
-news_fetcher = NewsFetcher(api_key=news_api_key)
-
-
-
-# 핸들러, 매니저, 분석 모듈 초기화
-slack_handler = SlackHandler(api_key=slack_api_key, channel_id="C0853ENPA2Z")
-message_manager = MessageManager(handlers=[slack_handler])
-keyword_analyzer = KeywordAnalysisModule()
-
-
-@app.route('/slack')
-def slack():
-    # Slack 메시지 필터링
-    slack_messages = [msg for msg in message_manager.messages if msg["source"] == "Slack"]
-    slack_keywords = keyword_analyzer.extract_nouns_and_count(slack_messages)
-    return render_template('index.html', title="Slack Keywords", keywords=slack_keywords)
-
-@app.route('/newslist')
+@app.route('/slack_newslist')
 def newslist():
-    # Slack 메시지에서 키워드 분석
-    slack_messages = [msg for msg in message_manager.messages if msg["source"] == "Slack"]
-    slack_keywords = keyword_analyzer.extract_nouns_and_count(slack_messages)
+    user_keywords = UserKeywordAnalysis().analyze_user_keywords(message_manager.messages)
+    personalized_news = fetch_personalized_news_with_keywords(user_keywords)
+    return render_template('user_newslist.html', title="Personalized News with Keywords", user_news=personalized_news)
 
-    # 상위 5개의 키워드로 뉴스 검색
-    top_keywords = list(slack_keywords.keys())[:5]
-    news_articles = []
-    for keyword in top_keywords:
-        news_articles.extend(news_fetcher.fetch_news(keyword))
+def fetch_personalized_news_with_keywords(user_keywords, max_articles=3):
+    personalized_news = {}
+    for user, keywords in user_keywords.items():
+        top_keywords = list(keywords.keys())[:3]
+        articles = []
+        for keyword in top_keywords:
+            articles.extend(news_fetcher.fetch_news(keyword, max_articles=max_articles))
+        personalized_news[user] = {"keywords": top_keywords, "articles": articles}
+    return personalized_news
 
-    return render_template(
-        'newslist.html',
-        title="News Articles Based on Keywords",
-        keywords=top_keywords,
-        news_articles=news_articles
-    )
-
-
-@socketio.on('connect')
-def handle_connect():
-    logging.info("Client connected.")
-
-
+# 실시간 백그라운드 작업
 def background_fetch():
     while True:
         try:
             new_messages = message_manager.fetch_messages()
             if new_messages:
                 logging.info(f"새로운 메시지: {[msg['text'] for msg in new_messages]}")
+                slack_messages = [msg for msg in message_manager.messages if msg["source"] == "Slack"]
+                updated_keywords = keyword_analyzer.extract_nouns_and_count(slack_messages)
+                socketio.emit('update_news', {'keywords': updated_keywords})
             socketio.sleep(10)
         except Exception as e:
             logging.error(f"Error during background fetch: {e}")
 
-
+# 초기화
+slack_handler = SlackHandler(api_key=slack_api_key, channel_id="C0853ENPA2Z")
+message_manager = MessageManager(handlers=[slack_handler])
+keyword_analyzer = KeywordAnalysisModule()
+news_fetcher = NewsFetcher(api_key=news_api_key)
 socketio.start_background_task(background_fetch)
 
 if __name__ == '__main__':
-    socketio.run(app, debug=True)
+    socketio.run(app, host='0.0.0.0', port=5000, debug=True)
+
