@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <title>사용자별 키워드 분석 결과</title>
+    <style>
+      .user-container {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 20px;
+      }
+      .user-box {
+        border: 1px solid #ccc;
+        padding: 10px;
+        width: 300px;
+      }
+      .user-title {
+        font-weight: bold;
+        margin-bottom: 10px;
+      }
+      .keyword-list {
+        margin-top: 10px;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>사용자별 키워드 분석</h1>
+    <div class="user-container">
+      {% for user, keywords in user_data.items() %}
+      <div class="user-box">
+        <div class="user-title">User: {{ user }}</div>
+        <ul class="keyword-list">
+          {% for keyword, count in keywords.items() %}
+          <li>{{ keyword }}: {{ count }}</li>
+          {% endfor %}
+        </ul>
+      </div>
+      {% endfor %}
+    </div>
+  </body>
+</html>
